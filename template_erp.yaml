@@ -1,0 +1,418 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ERPNext en AWS con Arquitectura Empresarial Completa'
+
+Parameters:
+  KeyPairName:
+    Description: Nombre del par de claves SSH existente
+    Type: AWS::EC2::KeyPair::KeyName
+  VpcCIDR:
+    Description: CIDR block para la VPC
+    Type: String
+    Default: 10.0.0.0/16
+  SiteDomain:
+    Description: Dominio para ERPNext
+    Type: String
+    Default: erp.example.com
+  AdminPassword:
+    Description: Contraseña de administrador para ERPNext
+    Type: String
+    NoEcho: true
+    MinLength: 8
+  DBInstanceClass:
+    Description: Tipo de instancia para RDS
+    Type: String
+    Default: db.t3.medium
+    AllowedValues: [db.t3.medium, db.t3.large, db.m5.large]
+  CacheNodeType:
+    Description: Tipo de nodo para ElastiCache
+    Type: String
+    Default: cache.t3.small
+    AllowedValues: [cache.t3.small, cache.t3.medium, cache.m5.large]
+  InstanceType:
+    Description: Tipo de instancia EC2
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3.large, m5.large]
+
+Resources:
+  # VPC y Networking
+  ERPNextVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subredes Públicas
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-PublicSubnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-PublicSubnet-2
+
+  # Subredes Privadas
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: ERPNext-PrivateSubnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: ERPNext-PrivateSubnet-2
+
+  # Tablas de Rutas
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  # Security Groups
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso web HTTP/HTTPS
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a la capa de aplicación
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a la base de datos
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a Redis
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  # RDS Multi-AZ
+  ERPNextDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mariadb
+      EngineVersion: '10.6'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 100
+      StorageType: gp3
+      MultiAZ: true
+      MasterUsername: admin
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:ERPNextSecrets:SecretString:dbPassword}}'
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      Parameters:
+        - ParameterName: character_set_server
+          ParameterValue: utf8mb4
+        - ParameterName: collation_server
+          ParameterValue: utf8mb4_unicode_ci
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group para RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # ElastiCache Redis
+  ERPNextCache:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheNodeType: !Ref CacheNodeType
+      Engine: redis
+      NumCacheNodes: 1
+      VpcSecurityGroupIds:
+        - !GetAtt CacheSecurityGroup.GroupId
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group para ElastiCache
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # Auto Scaling Group para instancias de aplicación
+  ERPNextLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: ami-0fc5d935ebf8bc3bc # Ubuntu 22.04 LTS en us-east-1
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      SecurityGroups:
+        - !Ref AppSecurityGroup
+      IamInstanceProfile: !Ref ERPNextInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Script de instalación de ERPNext
+          apt-get update -y
+          apt-get install -y python3-pip git software-properties-common
+          
+          # Instalar Bench
+          pip3 install frappe-bench cryptography --upgrade
+          
+          # Configurar entorno
+          bench init frappe-bench --frappe-branch version-14
+          cd frappe-bench
+          
+          # Crear sitio con RDS
+          bench new-site ${SiteDomain} \
+            --db-type mariadb \
+            --db-host ${ERPNextDB.Endpoint.Address} \
+            --db-port ${ERPNextDB.Endpoint.Port} \
+            --db-name erpnext \
+            --db-user admin \
+            --db-pass ${AdminPassword} \
+            --admin-password ${AdminPassword} \
+            --redis-cache ${ERPNextCache.RedisEndpoint.Address}:${ERPNextCache.RedisEndpoint.Port}
+          
+          # Instalar ERPNext
+          bench get-app erpnext https://github.com/frappe/erpnext --branch version-14
+          bench --site ${SiteDomain} install-app erpnext
+          
+          # Configurar producción
+          bench setup nginx
+          bench setup supervisor
+          bench setup production
+          
+          # Habilitar scheduler
+          bench --site ${SiteDomain} enable-scheduler
+          bench --site ${SiteDomain} set-maintenance-mode off
+
+  ERPNextASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchConfigurationName: !Ref ERPNextLaunchConfig
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref ERPNextTargetGroup
+      Tags:
+        - Key: Name
+          Value: ERPNext-App-Instance
+          PropagateAtLaunch: true
+
+  # Application Load Balancer
+  ERPNextALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref WebSecurityGroup
+
+  ERPNextTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref ERPNextVPC
+      HealthCheckPath: /login
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  ERPNextListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ERPNextALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ERPNextTargetGroup
+
+  # IAM Rol para instancias EC2
+  ERPNextRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: ERPNextS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: '*'
+
+  ERPNextInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ERPNextRole
+
+  # S3 Bucket para backups
+  ERPNextBackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erpnext-backups-${AWS::AccountId}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierRule
+            Status: Enabled
+            Prefix: 'glacier/'
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+
+  # Secrets Manager para credenciales
+  ERPNextSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: ERPNextCredentials
+      Description: Credenciales para ERPNext
+      GenerateSecretString:
+        SecretStringTemplate: '{"dbPassword": "CHANGE_ME"}'
+        GenerateStringKey: "adminPassword"
+        PasswordLength: 16
+        ExcludePunctuation: true
+
+  # VPN para conexión local
+  VPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties:
+      Type: ipsec.1
+
+  VPNGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      VpnGatewayId: !Ref VPNGateway
+
+  CustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      BgpAsn: 65000
+      IpAddress: 1.2.3.4 # Reemplazar con IP pública local
+      Type: ipsec.1
+
+  VPNConnection:
+    Type: AWS::EC2::VPNConnection
+    Properties:
+      Type: ipsec.1
+      CustomerGatewayId: !Ref CustomerGateway
+      VpnGatewayId: !Ref VPNGateway
+      StaticRoutesOnly: true
+
+Outputs:
+  ERPNextURL:
+    Description: URL de acceso a ERPNext
+    Value: !Sub http://${ERPNextALB.DNSName}
+  RDSEndpoint:
+    Description: Endpoint de la base de datos RDS
+    Value: !GetAtt ERPNextDB.Endpoint.Address
+  RedisEndpoint:
+    Description: Endpoint de Redis
+    Value: !GetAtt ERPNextCache.RedisEndpoint.Address
+  BackupBucket:
+    Description: Bucket de S3 para backups
+    Value: !Ref ERPNextBackupBucket
+  VPNConfig:
+    Description: Configuración para VPN local
+    Value: !GetAtt VPNConnection.VpnConnectionId

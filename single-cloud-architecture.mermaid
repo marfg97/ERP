@@ -1,0 +1,54 @@
+graph TD
+    subgraph "Zona 1: Nube AWS"
+        subgraph "Capa de Acceso y Seguridad"
+            DNS[DNS / CDN]
+            WAF[WAF / Firewall]
+            LB[Load Balancer]
+        end
+
+        subgraph "Capa de Aplicacion ERP"
+            APP1[App Server 1]
+            APP2[App Server 2]
+            CONT1[Contenedor Finanzas]
+            CONT2[Contenedor Inventarios]
+            CONT3[Contenedor Ventas]
+        end
+
+        subgraph "Capa de Integracion"
+            BUS[Bus de Integracion]
+            TOPIC[Cola de Eventos]
+        end
+
+        subgraph "Capa de Datos"
+            DB_MAIN[(Base de Datos Principal)]
+            CACHE[(Cache Redis)]
+            DB_DR[(Base de Datos Disaster Recovery)]
+        end
+
+        subgraph "Gobierno y Observabilidad"
+            LOG[CloudWatch Logs]
+            ID[IAM Identidad]
+        end
+    end
+
+    subgraph "Zona 2: Usuarios"
+        USUARIO(Usuario Navegador)
+        SUCURSAL(Sucursal VPN)
+    end
+
+    USUARIO -->|HTTPS| DNS
+    SUCURSAL -->|VPN| LB
+    
+    DNS --> WAF --> LB
+    LB --> APP1
+    LB --> APP2
+    APP2 --> BUS
+    BUS --> TOPIC
+    CONT1 --> DB_MAIN
+    CONT2 --> DB_MAIN
+    DB_MAIN --> CACHE
+    DB_MAIN -->|Sincronizacion| DB_DR
+    
+    ID -.->|Controla acceso| APP1
+    BUS -.-> LOG
+    DB_MAIN -.-> LOG
