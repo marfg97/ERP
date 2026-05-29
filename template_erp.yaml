@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'ERPNext en AWS con Arquitectura Empresarial Completa'
+Description: 'ERPNext en AWS'
 
 Parameters:
   
