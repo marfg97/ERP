@@ -2,44 +2,31 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'ERPNext en AWS con Arquitectura Empresarial Completa'
 
 Parameters:
-  KeyPairName:
-    Description: Nombre del par de claves SSH existente
-    Type: AWS::EC2::KeyPair::KeyName
-  VpcCIDR:
-    Description: CIDR block para la VPC
-    Type: String
-    Default: 10.0.0.0/16
+  
+  ## Dominio y credenciales para ERPNext
   SiteDomain:
     Description: Dominio para ERPNext
     Type: String
-    Default: erp.example.com
+    Default: erp.theartificialmachine.com
   AdminPassword:
     Description: Contraseña de administrador para ERPNext
     Type: String
     NoEcho: true
     MinLength: 8
-  DBInstanceClass:
-    Description: Tipo de instancia para RDS
+  KeyPairName:
+    Description: Nombre del par de llaves SSH para la instancia EC2
+    Type: AWS::EC2::KeyPair::KeyName
+  ERPNextAmiId:
+    Description: AMI ID para instancias ERPNext
     Type: String
-    Default: db.t3.medium
-    AllowedValues: [db.t3.medium, db.t3.large, db.m5.large]
-  CacheNodeType:
-    Description: Tipo de nodo para ElastiCache
-    Type: String
-    Default: cache.t3.small
-    AllowedValues: [cache.t3.small, cache.t3.medium, cache.m5.large]
-  InstanceType:
-    Description: Tipo de instancia EC2
-    Type: String
-    Default: t3.medium
-    AllowedValues: [t3.medium, t3.large, m5.large]
+    Default: ami-0cae499924965c164
 
 Resources:
   # VPC y Networking
   ERPNextVPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VpcCIDR
+      CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
@@ -115,6 +102,62 @@ Resources:
     Properties:
       VpcId: !Ref ERPNextVPC
 
+  EIPNat:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNat.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
   # Security Groups
   WebSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -174,21 +217,17 @@ Resources:
     Properties:
       Engine: mariadb
       EngineVersion: '10.6'
-      DBInstanceClass: !Ref DBInstanceClass
+      DBInstanceClass: db.t3.medium # db.t3.large, db.m5.large]
       AllocatedStorage: 100
       StorageType: gp3
       MultiAZ: true
       MasterUsername: admin
-      MasterUserPassword: !Sub '{{resolve:secretsmanager:ERPNextSecrets:SecretString:dbPassword}}'
+      MasterUserPassword: admin ##!Sub '{{resolve:secretsmanager:ERPNextSecrets:SecretString:dbPassword}}'
       VPCSecurityGroups:
         - !GetAtt DBSecurityGroup.GroupId
       DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref ERPNextDBParameterGroup
       PubliclyAccessible: false
-      Parameters:
-        - ParameterName: character_set_server
-          ParameterValue: utf8mb4
-        - ParameterName: collation_server
-          ParameterValue: utf8mb4_unicode_ci
 
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -198,11 +237,21 @@ Resources:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
 
+  # Parámetros RDS
+  ERPNextDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Grupo de parámetros para MariaDB ERPNext
+      Family: mariadb10.6
+      Parameters:
+        character_set_server: utf8mb4
+        collation_server: utf8mb4_unicode_ci
+
   # ElastiCache Redis
   ERPNextCache:
     Type: AWS::ElastiCache::CacheCluster
     Properties:
-      CacheNodeType: !Ref CacheNodeType
+      CacheNodeType: cache.t3.small # cache.t3.medium, cache.m5.large]
       Engine: redis
       NumCacheNodes: 1
       VpcSecurityGroupIds:
@@ -217,58 +266,64 @@ Resources:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
 
-  # Auto Scaling Group para instancias de aplicación
-  ERPNextLaunchConfig:
-    Type: AWS::AutoScaling::LaunchConfiguration
+  # Launch Template para instancias de aplicación
+  ERPNextLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      ImageId: ami-0fc5d935ebf8bc3bc # Ubuntu 22.04 LTS en us-east-1
-      InstanceType: !Ref InstanceType
-      KeyName: !Ref KeyPairName
-      SecurityGroups:
-        - !Ref AppSecurityGroup
-      IamInstanceProfile: !Ref ERPNextInstanceProfile
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          # Script de instalación de ERPNext
-          apt-get update -y
-          apt-get install -y python3-pip git software-properties-common
-          
-          # Instalar Bench
-          pip3 install frappe-bench cryptography --upgrade
-          
-          # Configurar entorno
-          bench init frappe-bench --frappe-branch version-14
-          cd frappe-bench
-          
-          # Crear sitio con RDS
-          bench new-site ${SiteDomain} \
-            --db-type mariadb \
-            --db-host ${ERPNextDB.Endpoint.Address} \
-            --db-port ${ERPNextDB.Endpoint.Port} \
-            --db-name erpnext \
-            --db-user admin \
-            --db-pass ${AdminPassword} \
-            --admin-password ${AdminPassword} \
-            --redis-cache ${ERPNextCache.RedisEndpoint.Address}:${ERPNextCache.RedisEndpoint.Port}
-          
-          # Instalar ERPNext
-          bench get-app erpnext https://github.com/frappe/erpnext --branch version-14
-          bench --site ${SiteDomain} install-app erpnext
-          
-          # Configurar producción
-          bench setup nginx
-          bench setup supervisor
-          bench setup production
-          
-          # Habilitar scheduler
-          bench --site ${SiteDomain} enable-scheduler
-          bench --site ${SiteDomain} set-maintenance-mode off
+      LaunchTemplateName: !Sub ERPNextLaunchTemplate-${AWS::StackName}
+      LaunchTemplateData:
+        ImageId: !Ref ERPNextAmiId
+        InstanceType: t3.medium # t3.large, m5.large
+        KeyName: !Ref KeyPairName ## clave ssh 
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref ERPNextInstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Script de instalación de ERPNext
+            apt-get update -y
+            apt-get install -y python3-pip git software-properties-common
+            
+            # Instalar Bench
+            pip3 install frappe-bench cryptography --upgrade
+            
+            # Configurar entorno
+            bench init frappe-bench --frappe-branch version-14
+            cd frappe-bench
+            
+            # Crear sitio con RDS
+            bench new-site ${SiteDomain} \
+              --db-type mariadb \
+              --db-host ${ERPNextDB.Endpoint.Address} \
+              --db-port ${ERPNextDB.Endpoint.Port} \
+              --db-name erpnext \
+              --db-user admin \
+              --db-pass ${AdminPassword} \
+              --admin-password ${AdminPassword} \
+              --redis-cache ${ERPNextCache.RedisEndpoint.Address}:${ERPNextCache.RedisEndpoint.Port}
+            
+            # Instalar ERPNext
+            bench get-app erpnext https://github.com/frappe/erpnext --branch version-14
+            bench --site ${SiteDomain} install-app erpnext
+            
+            # Configurar producción
+            bench setup nginx
+            bench setup supervisor
+            bench setup production
+            
+            # Habilitar scheduler
+            bench --site ${SiteDomain} enable-scheduler
+            bench --site ${SiteDomain} set-maintenance-mode off
 
   ERPNextASG:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
-      LaunchConfigurationName: !Ref ERPNextLaunchConfig
+      LaunchTemplate:
+        LaunchTemplateSpecification:
+          LaunchTemplateId: !Ref ERPNextLaunchTemplate
+          Version: !GetAtt ERPNextLaunchTemplate.LatestVersionNumber
       MinSize: 2
       MaxSize: 4
       DesiredCapacity: 2
@@ -298,6 +353,7 @@ Resources:
     Properties:
       Port: 80
       Protocol: HTTP
+      TargetType: instance
       VpcId: !Ref ERPNextVPC
       HealthCheckPath: /login
       HealthCheckIntervalSeconds: 30
@@ -348,7 +404,7 @@ Resources:
   ERPNextBackupBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: !Sub erpnext-backups-${AWS::AccountId}
+      BucketName: !Sub erpnext-backups-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}
       AccessControl: Private
       VersioningConfiguration:
         Status: Enabled
@@ -369,7 +425,7 @@ Resources:
       Description: Credenciales para ERPNext
       GenerateSecretString:
         SecretStringTemplate: '{"dbPassword": "CHANGE_ME"}'
-        GenerateStringKey: "adminPassword"
+        GenerateStringKey: dbPassword
         PasswordLength: 16
         ExcludePunctuation: true
 
