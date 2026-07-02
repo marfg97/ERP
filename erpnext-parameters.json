@@ -1,0 +1,9 @@
+template-file-path: template_erp.yaml
+parameters:
+  KeyPairName: erpnext-instance-key
+  ERPNextAmiId: ami-0cae499924965c164
+  ERPAdminPassword: '****'
+  DBMasterPassword: '****'
+  SiteDomain: erp.theartificialmachine.com
+tags:
+  Version: 1.1.1
