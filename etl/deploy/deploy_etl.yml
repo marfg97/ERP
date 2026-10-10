@@ -1,0 +1,516 @@
+# ============================================
+# RECURSOS ETL PARA DATA WAREHOUSE
+# ============================================
+
+  # ============================================
+  # S3 Buckets para Data Lake
+  # ============================================
+  
+  # Bucket Raw - Datos crudos desde RDS
+  ERPRawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-raw-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacier
+            Status: Enabled
+            Prefix: archive/
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # Bucket Processed - Datos limpios y transformados
+  ERPProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-processed-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # Bucket Aggregated - Datos agregados para BI
+  ERPAggregatedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-aggregated-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # ============================================
+  # AWS Glue - Catálogo y Jobs ETL
+  # ============================================
+
+  # Base de datos en Glue Catalog
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: erpnext_db
+        Description: Base de datos para ERPNext
+
+  # Conexión a RDS para Glue
+  GlueRDSConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        ConnectionType: JDBC
+        Description: Conexión a RDS Mariadb
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub jdbc:mysql://${ERPNextDB.Endpoint.Address}:3306/erpnext
+          USERNAME: admin
+          PASSWORD: !Ref DBMasterPassword
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList:
+            - !Ref AppSecurityGroup
+          SubnetId: !Ref PrivateSubnet1
+
+  # Crawler para tablas de ERPNext
+  ERPCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: erpnext-crawler
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Description: Crawler para tablas de ERPNext
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueRDSConnection
+            Path: erpnext/%
+            Exclusions:
+              - "information_schema/%"
+              - "mysql/%"
+              - "performance_schema/%"
+      Schedule:
+        ScheduleExpression: cron(0 1 * * ? *) # Diario a la 1 AM
+      SchemaChangePolicy:
+        UpdateBehavior: LOG
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": { "AddOrUpdateBehavior": "InheritFromTable" }
+          }
+        }
+
+  # ============================================
+  # AWS Glue Jobs - Transformaciones
+  # ============================================
+
+  # Job para transformar datos de ventas
+  SalesETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: erpnext-sales-etl
+      Role: !GetAtt GlueServiceRole.Arn
+      GlueVersion: '4.0'
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://${ERPProcessedBucket}/scripts/sales_etl.py
+        PythonVersion: '3'
+      DefaultArguments:
+        '--TempDir': !Sub s3://${ERPRawBucket}/temp/
+        '--job-bookmark-option': 'job-bookmark-enable'
+        '--enable-metrics': 'true'
+        '--enable-continuous-cloudwatch-log': 'true'
+        '--enable-observability-metrics': 'true'
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      Connections:
+        Connections:
+          - !Ref GlueRDSConnection
+      MaxRetries: 2
+      Timeout: 60
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+      NotificationProperty:
+        NotifyDelayAfter: 60
+
+  # Job para transformar datos de inventario
+  InventoryETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: erpnext-inventory-etl
+      Role: !GetAtt GlueServiceRole.Arn
+      GlueVersion: '4.0'
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://${ERPProcessedBucket}/scripts/inventory_etl.py
+        PythonVersion: '3'
+      DefaultArguments:
+        '--TempDir': !Sub s3://${ERPRawBucket}/temp/
+        '--job-bookmark-option': 'job-bookmark-enable'
+        '--enable-metrics': 'true'
+      Connections:
+        Connections:
+          - !Ref GlueRDSConnection
+      MaxRetries: 2
+      Timeout: 60
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+
+  # Job para transformar datos financieros
+  FinanceETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: erpnext-finance-etl
+      Role: !GetAtt GlueServiceRole.Arn
+      GlueVersion: '4.0'
+      Command:
+        Name: glueetl
+        ScriptLocation: !Sub s3://${ERPProcessedBucket}/scripts/finance_etl.py
+        PythonVersion: '3'
+      DefaultArguments:
+        '--TempDir': !Sub s3://${ERPRawBucket}/temp/
+        '--job-bookmark-option': 'job-bookmark-enable'
+        '--enable-metrics': 'true'
+      Connections:
+        Connections:
+          - !Ref GlueRDSConnection
+      MaxRetries: 2
+      Timeout: 60
+      NumberOfWorkers: 2
+      WorkerType: G.1X
+
+  # ============================================
+  # Amazon Redshift - Data Warehouse
+  # ============================================
+
+  # Subnet Group para Redshift
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group para Redshift
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # Security Group para Redshift
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a Redshift
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  # Cluster Redshift
+  ERPDataWarehouse:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: erp-warehouse
+      DatabaseName: erp_analytics
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBMasterPassword
+      NodeType: dc2.large
+      NumberOfNodes: 2
+      PubliclyAccessible: false
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt RedshiftSecurityGroup.GroupId
+      AutomatedSnapshotRetentionPeriod: 14
+      Encrypted: true
+      KmsKeyId: alias/aws/redshift
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # ============================================
+  # AWS Step Functions - Orquestación ETL
+  # ============================================
+
+  ETLStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: erpnext-etl-pipeline
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "ERPNext ETL Pipeline",
+          "StartAt": "ExtractFromRDS",
+          "States": {
+            "ExtractFromRDS": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:dms:startReplicationTask",
+              "Parameters": {
+                "ReplicationTaskArn": "${DMSReplicationTask}",
+                "StartReplicationTaskType": "start-replication"
+              },
+              "Next": "WaitForExtract"
+            },
+            "WaitForExtract": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "TransformSales"
+            },
+            "TransformSales": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${SalesETLJob}"
+              },
+              "Next": "TransformInventory"
+            },
+            "TransformInventory": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${InventoryETLJob}"
+              },
+              "Next": "TransformFinance"
+            },
+            "TransformFinance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${FinanceETLJob}"
+              },
+              "Next": "LoadToRedshift"
+            },
+            "LoadToRedshift": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startJobRun.sync",
+              "Parameters": {
+                "JobName": "${RedshiftLoadJob}"
+              },
+              "Next": "RefreshQuickSight"
+            },
+            "RefreshQuickSight": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::aws-sdk:quicksight:refreshDataSet",
+              "Parameters": {
+                "AwsAccountId": "${AWS::AccountId}",
+                "DataSetId": "${QuickSightDataSet}"
+              },
+              "End": true
+            }
+          }
+        }
+
+  # ============================================
+  # Amazon QuickSight - BI
+  # ============================================
+
+  QuickSightUser:
+    Type: AWS::QuickSight::User
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      Email: admin@empresa.com
+      IdentityType: IAM
+      Namespace: default
+      UserRole: ADMIN
+      UserName: erp-analytics-admin
+
+  QuickSightDataSource:
+    Type: AWS::QuickSight::DataSource
+    Properties:
+      AwsAccountId: !Ref AWS::AccountId
+      DataSourceId: erp-redshift-datasource
+      Name: ERPNext Redshift
+      Type: REDSHIFT
+      DataSourceParameters:
+        RedshiftParameters:
+          Database: erp_analytics
+          Host: !GetAtt ERPDataWarehouse.Endpoint.Address
+          Port: !GetAtt ERPDataWarehouse.Endpoint.Port
+          ClusterId: !Ref ERPDataWarehouse
+      Credentials:
+        CredentialPair:
+          Password: !Ref DBMasterPassword
+          Username: admin
+
+  # ============================================
+  # EventBridge Rules - Programación
+  # ============================================
+
+  DailyETLSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: erpnext-daily-etl
+      Description: Ejecuta ETL diario a las 2 AM
+      ScheduleExpression: cron(0 2 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ETLStateMachine.Arn
+          Id: ETLStateMachine
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+  # ============================================
+  # IAM Roles para ETL
+  # ============================================
+
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - glue.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:*
+                  - s3:*
+                  - redshift:*
+                  - secretsmanager:*
+                  - cloudwatch:*
+                  - logs:*
+                Resource: '*'
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - glue:StartJobRun
+                  - glue:GetJobRun
+                  - dms:StartReplicationTask
+                  - dms:DescribeReplicationTasks
+                  - quicksight:RefreshDataSet
+                  - s3:*
+                  - redshift:*
+                  - sqs:*
+                Resource: '*'
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !GetAtt ETLStateMachine.Arn
+
+  # ============================================
+  # AWS DMS - Replicación CDC
+  # ============================================
+
+  DMSReplicationInstance:
+    Type: AWS::DMS::ReplicationInstance
+    Properties:
+      ReplicationInstanceClass: dms.t3.medium
+      AllocatedStorage: 100
+      PubliclyAccessible: false
+      VpcSecurityGroupIds:
+        - !GetAtt AppSecurityGroup.GroupId
+      ReplicationSubnetGroupIdentifier: !Ref DMSSubnetGroup
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  DMSSubnetGroup:
+    Type: AWS::DMS::ReplicationSubnetGroup
+    Properties:
+      ReplicationSubnetGroupDescription: Subnet group para DMS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  DMSEndpointSource:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: erp-source
+      EndpointType: source
+      EngineName: mariadb
+      Username: admin
+      Password: !Ref DBMasterPassword
+      ServerName: !GetAtt ERPNextDB.Endpoint.Address
+      Port: 3306
+      DatabaseName: erpnext
+
+  DMSEndpointTarget:
+    Type: AWS::DMS::Endpoint
+    Properties:
+      EndpointIdentifier: erp-s3-target
+      EndpointType: target
+      EngineName: s3
+      S3Settings:
+        BucketFolder: raw/
+        BucketName: !Ref ERPRawBucket
+        CompressionType: GZIP
+        DataFormat: Parquet
+        ParquetVersion: parquet-2-0
+
+  DMSReplicationTask:
+    Type: AWS::DMS::ReplicationTask
+    Properties:
+      ReplicationTaskIdentifier: erpnext-cdc-task
+      SourceEndpointArn: !Ref DMSEndpointSource
+      TargetEndpointArn: !Ref DMSEndpointTarget
+      ReplicationInstanceArn: !Ref DMSReplicationInstance
+      MigrationType: full-load-and-cdc
+      TableMappings:
+        Fn::ToJsonString:
+          rules:
+            - rule-type: selection
+              rule-id: '1'
+              rule-name: SelectAllTables
+              object-locator:
+                schema-name: erpnext
+              rule-action: include

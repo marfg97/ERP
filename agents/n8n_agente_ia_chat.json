@@ -1,0 +1,306 @@
+{
+  "name": "Agente IA - Chat Pymes (Bedrock)",
+  "nodes": [
+    {
+      "id": "w1",
+      "name": "Webhook Chat",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agent-chat",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "w2",
+      "name": "Validar Entrada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "parameters": {
+        "jsCode": "const body = $json.body || $json;\nreturn [{\n  json: {\n    company_id: body.company_id,\n    agent_id: body.agent_id,\n    user_id: body.user_id || null,\n    channel: body.channel || 'api',\n    message: body.message\n  }\n}];"
+      }
+    },
+    {
+      "id": "w3",
+      "name": "Cargar Empresa",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [640, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT frappe_site_url FROM companies WHERE id = {{$json.company_id}} LIMIT 1;",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w4",
+      "name": "Cargar Agente",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [860, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, bedrock_model_id, system_prompt FROM ai_agents WHERE id = {{$('Validar Entrada').item.json.agent_id}} AND company_id = {{$('Validar Entrada').item.json.company_id}} AND status = 'active' LIMIT 1;",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w5",
+      "name": "Buscar Conversación Abierta",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1080, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM ai_conversations WHERE company_id = {{$('Validar Entrada').item.json.company_id}} AND agent_id = {{$('Validar Entrada').item.json.agent_id}} AND user_id = {{$('Validar Entrada').item.json.user_id}} AND channel = '{{$('Validar Entrada').item.json.channel}}' AND status = 'open' ORDER BY started_at DESC LIMIT 1;",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w6",
+      "name": "Evaluar Conversación",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1300, 300],
+      "parameters": {
+        "jsCode": "const row = $input.first().json;\nreturn [{ json: { exists: !!(row && row.id), id: row ? row.id : null } }];"
+      }
+    },
+    {
+      "id": "w7",
+      "name": "Existe Conversación",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1520, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{$json.exists}}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "w8",
+      "name": "Usar Conversación Existente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1740, 200],
+      "parameters": {
+        "jsCode": "const ctx = $('Validar Entrada').item.json;\nconst convId = $('Evaluar Conversación').item.json.id;\nreturn [{ json: { ...ctx, conversation_id: convId } }];"
+      }
+    },
+    {
+      "id": "w9",
+      "name": "Crear Conversación",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1740, 420],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_conversations (company_id, agent_id, user_id, channel, status)\nVALUES ({{$('Validar Entrada').item.json.company_id}}, {{$('Validar Entrada').item.json.agent_id}}, {{$('Validar Entrada').item.json.user_id}}, '{{$('Validar Entrada').item.json.channel}}', 'open');",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w10",
+      "name": "Obtener ID Nueva Conversación",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [1960, 420],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM ai_conversations WHERE company_id = {{$('Validar Entrada').item.json.company_id}} AND agent_id = {{$('Validar Entrada').item.json.agent_id}} AND user_id = {{$('Validar Entrada').item.json.user_id}} AND channel = '{{$('Validar Entrada').item.json.channel}}' AND status = 'open' ORDER BY started_at DESC LIMIT 1;",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w11",
+      "name": "Usar Conversación Nueva",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 420],
+      "parameters": {
+        "jsCode": "const ctx = $('Validar Entrada').item.json;\nconst convId = $input.first().json.id;\nreturn [{ json: { ...ctx, conversation_id: convId } }];"
+      }
+    },
+    {
+      "id": "w12",
+      "name": "Preparar Mensaje SQL-Safe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 300],
+      "parameters": {
+        "jsCode": "const ctx = $json;\nconst safe = String(ctx.message || '').replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\");\nreturn [{ json: { ...ctx, message_sql: safe } }];"
+      }
+    },
+    {
+      "id": "w13",
+      "name": "Registrar Mensaje Usuario",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [2620, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_messages (conversation_id, role, content) VALUES ({{$json.conversation_id}}, 'user', '{{$json.message_sql}}');",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w14",
+      "name": "Agente IA",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [2840, 300],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Preparar Mensaje SQL-Safe').item.json.message }}",
+        "options": {
+          "systemMessage": "={{ $('Cargar Agente').item.json.system_prompt }}"
+        }
+      }
+    },
+    {
+      "id": "w15",
+      "name": "Modelo Bedrock",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1,
+      "position": [2760, 520],
+      "parameters": {
+        "model": "={{ $('Cargar Agente').item.json.bedrock_model_id }}",
+        "options": {}
+      },
+      "credentials": { "aws": { "id": "3", "name": "AWS - Bedrock" } }
+    },
+    {
+      "id": "w16",
+      "name": "Memoria de Conversación",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [2920, 520],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ 'conv-' + $json.conversation_id }}",
+        "contextWindowLength": 10
+      }
+    },
+    {
+      "id": "w17",
+      "name": "Herramienta: Consultar Cliente ERPNext",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [3080, 520],
+      "parameters": {
+        "toolDescription": "Consulta los datos de un cliente en ERPNext por su nombre exacto (Customer.name). Úsala para responder preguntas sobre contacto, grupo o territorio de un cliente.",
+        "method": "GET",
+        "url": "={{ $('Cargar Empresa').item.json.frappe_site_url }}/api/resource/Customer/{{ $fromAI('customer_name', 'Nombre exacto del cliente en Frappe (Customer.name)', 'string') }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": { "httpHeaderAuth": { "id": "2", "name": "Frappe API Key" } }
+    },
+    {
+      "id": "w18",
+      "name": "Herramienta: Consultar Ventas BI",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2,
+      "position": [3240, 520],
+      "parameters": {
+        "description": "Consulta el resumen de ventas (total vendido, margen, facturas y top 5 productos) de la empresa en un rango de fechas. Úsala para responder preguntas sobre ventas, ingresos o productos más vendidos.",
+        "source": "database",
+        "workflowId": {
+          "value": "REEMPLAZAR_CON_ID_DEL_WORKFLOW_TOOL_CONSULTAR_VENTAS_BI",
+          "mode": "list"
+        },
+        "workflowInputs": {
+          "value": {
+            "company_id": "={{ $('Validar Entrada').item.json.company_id }}",
+            "start_date": "={{ $fromAI('start_date', 'Fecha de inicio del periodo a consultar, formato YYYY-MM-DD', 'string') }}",
+            "end_date": "={{ $fromAI('end_date', 'Fecha de fin del periodo a consultar, formato YYYY-MM-DD', 'string') }}"
+          }
+        }
+      }
+    },
+    {
+      "id": "w19",
+      "name": "Preparar Registro Respuesta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3060, 300],
+      "parameters": {
+        "jsCode": "const ctx = $('Preparar Mensaje SQL-Safe').item.json;\nconst respuesta = $json.output || $json.text || '';\nconst safe = String(respuesta).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\");\nreturn [{ json: { conversation_id: ctx.conversation_id, reply: respuesta, reply_sql: safe } }];"
+      }
+    },
+    {
+      "id": "w20",
+      "name": "Registrar Mensaje Agente",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [3280, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ai_messages (conversation_id, role, content) VALUES ({{$json.conversation_id}}, 'agent', '{{$json.reply_sql}}');",
+        "options": {}
+      },
+      "credentials": { "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" } }
+    },
+    {
+      "id": "w21",
+      "name": "Responder Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3500, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { conversation_id: $json.conversation_id, reply: $json.reply } }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Chat": { "main": [[{ "node": "Validar Entrada", "type": "main", "index": 0 }]] },
+    "Validar Entrada": { "main": [[{ "node": "Cargar Empresa", "type": "main", "index": 0 }]] },
+    "Cargar Empresa": { "main": [[{ "node": "Cargar Agente", "type": "main", "index": 0 }]] },
+    "Cargar Agente": { "main": [[{ "node": "Buscar Conversación Abierta", "type": "main", "index": 0 }]] },
+    "Buscar Conversación Abierta": { "main": [[{ "node": "Evaluar Conversación", "type": "main", "index": 0 }]] },
+    "Evaluar Conversación": { "main": [[{ "node": "Existe Conversación", "type": "main", "index": 0 }]] },
+    "Existe Conversación": {
+      "main": [
+        [{ "node": "Usar Conversación Existente", "type": "main", "index": 0 }],
+        [{ "node": "Crear Conversación", "type": "main", "index": 0 }]
+      ]
+    },
+    "Usar Conversación Existente": { "main": [[{ "node": "Preparar Mensaje SQL-Safe", "type": "main", "index": 0 }]] },
+    "Crear Conversación": { "main": [[{ "node": "Obtener ID Nueva Conversación", "type": "main", "index": 0 }]] },
+    "Obtener ID Nueva Conversación": { "main": [[{ "node": "Usar Conversación Nueva", "type": "main", "index": 0 }]] },
+    "Usar Conversación Nueva": { "main": [[{ "node": "Preparar Mensaje SQL-Safe", "type": "main", "index": 0 }]] },
+    "Preparar Mensaje SQL-Safe": { "main": [[{ "node": "Registrar Mensaje Usuario", "type": "main", "index": 0 }]] },
+    "Registrar Mensaje Usuario": { "main": [[{ "node": "Agente IA", "type": "main", "index": 0 }]] },
+    "Agente IA": { "main": [[{ "node": "Preparar Registro Respuesta", "type": "main", "index": 0 }]] },
+    "Modelo Bedrock": { "ai_languageModel": [[{ "node": "Agente IA", "type": "ai_languageModel", "index": 0 }]] },
+    "Memoria de Conversación": { "ai_memory": [[{ "node": "Agente IA", "type": "ai_memory", "index": 0 }]] },
+    "Herramienta: Consultar Cliente ERPNext": { "ai_tool": [[{ "node": "Agente IA", "type": "ai_tool", "index": 0 }]] },
+    "Herramienta: Consultar Ventas BI": { "ai_tool": [[{ "node": "Agente IA", "type": "ai_tool", "index": 0 }]] },
+    "Preparar Registro Respuesta": { "main": [[{ "node": "Registrar Mensaje Agente", "type": "main", "index": 0 }]] },
+    "Registrar Mensaje Agente": { "main": [[{ "node": "Responder Webhook", "type": "main", "index": 0 }]] }
+  }
+}

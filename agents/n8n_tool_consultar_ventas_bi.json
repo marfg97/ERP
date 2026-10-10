@@ -1,0 +1,71 @@
+{
+  "name": "Tool - Consultar Ventas BI",
+  "nodes": [
+    {
+      "id": "t1",
+      "name": "Entrada de la Herramienta",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [220, 300],
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "company_id", "type": "number" },
+            { "name": "start_date", "type": "string" },
+            { "name": "end_date", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "t2",
+      "name": "Resumen de Ventas",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [440, 220],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(DISTINCT fs.frappe_doc_name) AS invoices, SUM(fs.total_amount) AS total_sales, SUM(fs.margin_amount) AS total_margin FROM fact_sales fs JOIN dim_date d ON fs.date_key = d.date_key WHERE fs.company_id = {{$json.company_id}} AND d.full_date BETWEEN '{{$json.start_date}}' AND '{{$json.end_date}}';",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" }
+      }
+    },
+    {
+      "id": "t3",
+      "name": "Top 5 Productos",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.4,
+      "position": [440, 400],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT di.item_name, SUM(fs.quantity) AS qty_sold, SUM(fs.total_amount) AS total_sales FROM fact_sales fs JOIN dim_date d ON fs.date_key = d.date_key JOIN dim_item di ON fs.item_key = di.item_key WHERE fs.company_id = {{$('Entrada de la Herramienta').item.json.company_id}} AND d.full_date BETWEEN '{{$('Entrada de la Herramienta').item.json.start_date}}' AND '{{$('Entrada de la Herramienta').item.json.end_date}}' GROUP BY di.item_name ORDER BY total_sales DESC LIMIT 5;",
+        "options": {}
+      },
+      "credentials": {
+        "mySql": { "id": "1", "name": "MariaDB - erp_bi_agents" }
+      }
+    },
+    {
+      "id": "t4",
+      "name": "Combinar Resultado",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300],
+      "parameters": {
+        "jsCode": "const resumen = $('Resumen de Ventas').first().json;\nconst topProductos = $('Top 5 Productos').all().map(i => i.json);\n\nconst texto = `Resumen de ventas del periodo:\\n` +\n  `- Facturas: ${resumen.invoices}\\n` +\n  `- Total vendido: ${resumen.total_sales}\\n` +\n  `- Margen total: ${resumen.total_margin}\\n` +\n  `- Top productos: ${topProductos.map(p => `${p.item_name} (${p.qty_sold} und, ${p.total_sales})`).join('; ')}`;\n\nreturn [{ json: { resumen, topProductos, texto } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Entrada de la Herramienta": {
+      "main": [[
+        { "node": "Resumen de Ventas", "type": "main", "index": 0 },
+        { "node": "Top 5 Productos", "type": "main", "index": 0 }
+      ]]
+    },
+    "Resumen de Ventas": { "main": [[{ "node": "Combinar Resultado", "type": "main", "index": 0 }]] },
+    "Top 5 Productos": { "main": [[{ "node": "Combinar Resultado", "type": "main", "index": 0 }]] }
+  }
+}

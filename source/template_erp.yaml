@@ -1,0 +1,1006 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ERPNext en AWS
+
+Parameters:
+
+  ## Dominio y credenciales para ERPNext
+  SiteDomain:
+    Description: Dominio para ERPNext
+    Type: String
+    Default: erp.theartificialmachine.com
+  ERPAdminPassword:
+    Description: Contrase?a de administrador para ERPNext
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Default: n8nSecurePass123!
+  DBMasterPassword:
+    Description: Contrase?a maestra para la base de datos RDS
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Default: erpnextDBPass123!
+  KeyPairName:
+    Description: Nombre del par de llaves SSH para la instancia EC2
+    Type: AWS::EC2::KeyPair::KeyName
+  ERPNextAmiId:
+    Description: AMI ID para instancias ERPNext
+    Type: String
+    Default: ami-0cae499924965c164
+  SSHAllowedCIDR:
+    Description: Rango CIDR permitido para SSH directo a la instancia
+    Type: String
+    Default: 0.0.0.0/0
+
+  #=============================
+  # N8N PARAMETERS
+  #============================
+  DomainName:
+    Description: Dominio para n8n
+    Type: String
+    Default: n8n.theartificialmachine.com
+  N8nBasicAuthUser:
+    Description: Usuario para autenticaci?n b?sica de n8n
+    Type: String
+    Default: admin
+  N8nBasicAuthPassword:
+    Description: Contrasena para autenticacion b?sica de n8n
+    Type: String
+    NoEcho: true
+    Default: n8nSecurePass123!
+  N8nEncryptionKey:
+    Description: Clave de encriptaci?n para n8n (32 caracteres m?nimo)
+    Type: String
+    NoEcho: true
+    Default: your-encryption-key-32-chars-minimum
+  RdsEndpoint:
+    Description: Endpoint de RDS para n8n|
+    Type: String
+    Default: erpnext-dev-ha-single-region-erpnextdb-mizgjhv6ygda.calu0eqgkv6d.us-east-1.rds.amazonaws.com
+
+  EcrRepository:
+    Description: URI del repositorio ECR
+    Type: String
+    Default: 329068432517.dkr.ecr.us-east-1.amazonaws.com/erp-agents/n8n-container
+  EcrImageTag:
+    Description: Tag de la imagen
+    Type: String
+    Default: latest
+
+Resources:
+  # VPC y Networking
+  ERPNextVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subredes P?blicas
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-PublicSubnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: ERPNext-PublicSubnet-2
+
+  # Subredes Privadas
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: ERPNext-PrivateSubnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: !Select
+        - 1
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: ERPNext-PrivateSubnet-2
+
+  # Tablas de Rutas
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ERPNextVPC
+
+  EIPNat:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNat.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable2
+
+  # Security Groups
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso web HTTP/HTTPS
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a la capa de aplicacion
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHAllowedCIDR
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a la base de datos
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  # Security Group para Redshift
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a Redshift
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Acceso a Redis
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+  #===================================
+  # SECRETS MANAGER PARA CREDENCIALES
+  #====================================
+  ERPNextSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: ERPNextCredentials_app
+      Description: Credenciales para ERPNext
+      SecretString: !Sub |
+        {
+          "dbPassword": "${DBMasterPassword}",
+          "erpAdminPassword": "${ERPAdminPassword}"
+        }
+  #=========================
+  # RDS Multi-AZ
+  #=========================
+  ERPNextDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: mariadb
+      EngineVersion: '10.6'
+      DBInstanceClass: db.t3.medium # db.t3.large, db.m5.large]
+      AllocatedStorage: 100
+      StorageType: gp3
+      MultiAZ: true
+      MasterUsername: admin
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${ERPNextSecrets}:SecretString:dbPassword}}'
+
+      VPCSecurityGroups:
+        - !GetAtt DBSecurityGroup.GroupId
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !Ref ERPNextDBParameterGroup
+      PubliclyAccessible: false
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group para RDS
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  # Parametros RDS
+  ERPNextDBParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Grupo de par?metros para MariaDB ERPNext
+      Family: mariadb10.6
+      Parameters:
+        character_set_server: utf8mb4
+        collation_server: utf8mb4_unicode_ci
+    # base de datos PostgreSQL para n8n
+  N8nPostgresDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      Engine: postgres
+      EngineVersion: '15.8'
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      StorageType: gp3
+      MasterUsername: n8n
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${ERPNextSecrets}:SecretString:dbPassword}}'
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: n8n-postgres-db
+
+    # ElastiCache Redis
+  ERPNextCache:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheNodeType: cache.t3.small # cache.t3.medium, cache.m5.large]
+      Engine: redis
+      NumCacheNodes: 1
+      VpcSecurityGroupIds:
+        - !GetAtt CacheSecurityGroup.GroupId
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group para ElastiCache
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  N8nSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group para n8n
+      VpcId: !Ref ERPNextVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5678
+          ToPort: 5678
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  #============================================
+  # ECS Cluster para n8n
+  #============================================
+  # --- Target Group para n8n (usando el ALB existente) ---
+  N8nTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: n8n-tg
+      Port: 5678
+      Protocol: HTTP
+      VpcId: !Ref ERPNextVPC
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Tags:
+        - Key: Name
+          Value: n8n-target-group
+
+  # --- Listener Rule para n8n (compartiendo el ALB) ---
+  N8nListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ERPNextListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /n8n/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref N8nTargetGroup
+
+  # --- ECS Cluster ---
+  N8nCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: n8n-cluster
+      CapacityProviders:
+        - FARGATE
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      Tags:
+        - Key: Name
+          Value: n8n-cluster
+
+  # --- Task Definition ---
+  N8nTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: n8n-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !GetAtt N8nExecutionRole.Arn
+      TaskRoleArn: !GetAtt N8nTaskRole.Arn
+      ContainerDefinitions:
+        - Name: n8n
+          Image: !Sub ${EcrRepository}:${EcrImageTag}
+          Essential: true
+          PortMappings:
+            - ContainerPort: 5678
+              Protocol: tcp
+          Environment:
+            - Name: DB_TYPE
+              Value: postgresdb
+            - Name: DB_POSTGRESDB_HOST
+              Value: !GetAtt N8nPostgresDB.Endpoint.Address
+            - Name: DB_POSTGRESDB_PORT
+              Value: "5432"
+            - Name: DB_POSTGRESDB_DATABASE
+              Value: n8n
+            - Name: DB_POSTGRESDB_USER
+              Value: admin
+            - Name: N8N_HOST
+              Value: !Ref DomainName
+            - Name: N8N_PROTOCOL
+              Value: http
+            - Name: N8N_PORT
+              Value: '5678'
+            - Name: N8N_BASIC_AUTH_ACTIVE
+              Value: 'true'
+            - Name: N8N_BASIC_AUTH_USER
+              Value: !Ref N8nBasicAuthUser
+            - Name: N8N_BASIC_AUTH_PASSWORD
+              Value: !Ref N8nBasicAuthPassword
+            - Name: N8N_ENCRYPTION_KEY
+              Value: !Ref N8nEncryptionKey
+            - Name: N8N_SECURE_COOKIE
+              Value: 'false'
+            - Name: WEBHOOK_URL
+              Value: !Sub http://${DomainName}
+          Secrets:
+            - Name: DB_MARIADB_PASSWORD
+              ValueFrom: !Ref N8nBasicAuthPassword
+          LogConfiguration:
+            LogDriver: awslogs 
+            Options:
+              awslogs-group: !Ref N8nLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: n8n
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - wget -qO- http://localhost:5678/healthz || exit 1
+            Interval: 30 # Tiempo entre verificaciones (aumentado)
+            Timeout: 10 # Tiempo m?ximo para una verificaci?n (aumentado)
+            Retries: 5 # Intentos antes de marcar como no saludable (aumentado)
+            StartPeriod: 60
+
+  # # --- ECS Service ---
+  # N8nService:
+  #   Type: AWS::ECS::Service
+  #   Properties:
+  #     ServiceName: n8n-service
+  #     Cluster: !Ref N8nCluster
+  #     TaskDefinition: !Ref N8nTaskDefinition
+  #     LaunchType: FARGATE
+  #     DesiredCount: 1
+  #     DeploymentConfiguration:
+  #       MinimumHealthyPercent: 100
+  #       MaximumPercent: 200
+  #     NetworkConfiguration:
+  #       AwsvpcConfiguration:
+  #         Subnets: 
+  #           - !Ref PrivateSubnet1
+  #           - !Ref PrivateSubnet2
+  #         SecurityGroups:
+  #           - !Ref N8nSecurityGroup
+  #         AssignPublicIp: DISABLED
+  #     LoadBalancers:
+  #       - TargetGroupArn: !Ref N8nTargetGroup
+  #         ContainerName: n8n
+  #         ContainerPort: 5678
+  #     HealthCheckGracePeriodSeconds: 120
+  #     Tags:
+  #       - Key: Name
+  #         Value: n8n-service
+
+  # --- Log Group ---
+  N8nLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/n8n
+      RetentionInDays: 7
+      Tags:
+        - Key: Name
+          Value: n8n-logs
+
+  # --- IAM Roles ---
+  N8nExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ERPNextSecrets
+
+  N8nTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt N8nLogGroup.Arn
+
+  # ============================================
+  # Launch Template para instancias de aplicaci?n
+  #============================================
+  ERPNextLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ERPNextLaunchTemplate-${AWS::StackName}
+      LaunchTemplateData:
+        ImageId: !Ref ERPNextAmiId
+        InstanceType: t3.medium # t3.large, m5.large
+        KeyName: !Ref KeyPairName ## clave ssh 
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref ERPNextInstanceProfile
+        UserData: !Base64
+          Fn::Sub: |
+            #!/bin/bash
+            set -e -x
+            exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+            echo "=== INICIANDO USERDATA: CONFIGURACI?N DE AMI ERPNEXT ==="
+            date
+
+            # ============================================
+            # 2. CONFIGURAR SSM AGENT
+            # ============================================
+            echo "=== CONFIGURANDO SSM AGENT ==="
+
+            if ! command -v amazon-ssm-agent &> /dev/null; then
+                echo "Instalando SSM Agent..."
+                apt-get update -y
+                apt-get install -y curl wget
+                curl -s https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb -o /tmp/amazon-ssm-agent.deb
+                dpkg -i /tmp/amazon-ssm-agent.deb || apt-get -f install -y
+            fi
+
+            systemctl enable amazon-ssm-agent
+            systemctl restart amazon-ssm-agent
+            sleep 10
+            echo "? SSM Agent configurado"
+          # # Obtener el nombre del sitio (puede ser cualquier dominio)
+          # SITE_NAME=$(bench --site all list-sites 2>/dev/null | head -1 | tr -d ' ')
+
+          # if [ -n "$SITE_NAME" ]; then
+          #     echo "Sitio encontrado: $SITE_NAME"
+
+
+          # # Configurar conexi?n a RDS
+          # bench config --site $SITE_NAME set db_host "${ERPNextDB.Endpoint.Address}"
+          # bench config --site $SITE_NAME set db_port "3306"
+          # bench config --site $SITE_NAME set db_name "erpnext"
+          # bench config --site $SITE_NAME set db_username "admin"
+          # bench config --site $SITE_NAME set db_password "${DBMasterPassword}"
+          # bench config --site $SITE_NAME set redis_cache "redis://${ERPNextCache.RedisEndpoint.Address}:6379"
+          # bench config --site $SITE_NAME set redis_queue "redis://${ERPNextCache.RedisEndpoint.Address}:6379"
+          # bench config --site $SITE_NAME set redis_socketio "redis://${ERPNextCache.RedisEndpoint.Address}:6379"
+
+          # # Reiniciar servicios
+          # bench restart
+          # supervisorctl restart all
+
+          # echo "=== USERDATA COMPLETADO ==="
+
+  ERPNextASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ERPNextLaunchTemplate
+        Version: !GetAtt ERPNextLaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      TargetGroupARNs:
+        - !Ref ERPNextTargetGroup
+      Tags:
+        - Key: Name
+          Value: ERPNext-App-Instance
+          PropagateAtLaunch: true
+
+  # Application Load Balancer
+  ERPNextALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref WebSecurityGroup
+
+  ERPNextTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref ERPNextVPC
+      HealthCheckPath: /login
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+
+  ERPNextListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ERPNextALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ERPNextTargetGroup
+
+  # IAM Rol para instancias EC2
+  ERPNextRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: ERPNextS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: '*'
+
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ERPNextSecrets
+
+  ERPNextInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref ERPNextRole
+
+  # S3 Bucket para backups
+  ERPNextBackupBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub backup-erp-${AWS::AccountId}-${AWS::Region}-${AWS::StackName}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierRule
+            Status: Enabled
+            Prefix: glacier/
+            Transitions:
+              - TransitionInDays: 30
+                StorageClass: GLACIER
+  # Bucket Raw - Datos crudos desde RDS
+  ERPRawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-raw-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: MoveToGlacier
+            Status: Enabled
+            Prefix: archive/
+            Transitions:
+              - TransitionInDays: 90
+                StorageClass: GLACIER
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # Bucket Processed - Datos limpios y transformados
+  ERPProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-processed-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # Bucket Aggregated - Datos agregados para BI
+  ERPAggregatedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub erp-aggregated-data-${AWS::AccountId}-${AWS::Region}
+      AccessControl: Private
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+
+  # ============================================
+  # GLUE CATALOG Y CONEXIONES PARA BI
+  # ============================================
+
+  # 1. Rol IAM para Glue
+  GlueServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueRDSAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:DescribeDBClusters
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref ERPNextSecrets
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub arn:aws:s3:::${ERPNextBackupBucket}
+                  - !Sub arn:aws:s3:::${ERPNextBackupBucket}/*
+
+  # 2. Base de datos en Glue Catalog
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: erpnext_db
+        Description: Base de datos para ERPNext
+
+  # 3. Conexion JDBC a RDS (MariaDB)
+  GlueRDSConnection:
+    Type: AWS::Glue::Connection
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      ConnectionInput:
+        Name: !Sub ${AWS::StackName}-glue-rds-connection
+        ConnectionType: JDBC
+        Description: Conexi?n a RDS MariaDB para Glue
+        ConnectionProperties:
+          JDBC_CONNECTION_URL: !Sub jdbc:mysql://${ERPNextDB.Endpoint.Address}:3306/erpnext
+          USERNAME: admin
+          PASSWORD: !Sub '{{resolve:secretsmanager:${ERPNextSecrets}:SecretString:dbPassword}}'
+        PhysicalConnectionRequirements:
+          SecurityGroupIdList:
+            - !Ref DBSecurityGroup
+          SubnetId: !Ref PrivateSubnet1
+          AvailabilityZone: !Select
+            - 0
+            - !GetAZs ''
+  ERPCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: !Sub ${AWS::StackName}-erpnext-crawler
+      Role: !GetAtt GlueServiceRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Description: Crawler para tablas de ERPNext
+      Targets:
+        JdbcTargets:
+          - ConnectionName: !Ref GlueRDSConnection
+            Path: erpnext/%
+            Exclusions:
+              - information_schema/%
+              - mysql/%
+              - performance_schema/%
+              - sys/%
+      Schedule:
+        ScheduleExpression: cron(0 1 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: LOG
+        DeleteBehavior: DEPRECATE_IN_DATABASE
+      Configuration: |
+        {
+          "Version": 1.0,
+          "CrawlerOutput": {
+            "Partitions": { "AddOrUpdateBehavior": "InheritFromTable" }
+          }
+        }
+
+  # ============================================
+  # Amazon Redshift - Data Warehouse
+  # ============================================
+
+  # Subnet Group para Redshift
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Subnet group para Redshift
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: redshift-subnet-group
+    # Cluster Redshift
+  ERPDataWarehouse:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: erp-warehouse
+      ClusterType: multi-node
+      DBName: erp_analytics
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBMasterPassword
+      NodeType: ra3.xlplus
+      NumberOfNodes: 2
+      PubliclyAccessible: false
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      VpcSecurityGroupIds:
+        - !GetAtt RedshiftSecurityGroup.GroupId
+      AutomatedSnapshotRetentionPeriod: 14
+      Encrypted: true
+      KmsKeyId: alias/aws/redshift
+      Tags:
+        - Key: Environment
+          Value: Production
+        - Key: Project
+          Value: ERPNext
+    # RedshiftAccessRole:
+    #   Type: AWS::IAM::Role
+    #   Properties:
+    #     AssumeRolePolicyDocument:
+    #       Version: '2012-10-17'
+    #       Statement:
+    #         - Effect: Allow
+    #           Principal:
+    #             Service: redshift.amazonaws.com
+    #           Action: sts:AssumeRole
+    #     ManagedPolicyArns:
+    #       - arn:aws:iam::aws:policy/AmazonRedshiftFullAccess
+
+    #================================
+    # VPN para conexion local
+    #================================
+  VPNGateway:
+    Type: AWS::EC2::VPNGateway
+    Properties:
+      Type: ipsec.1
+
+  VPNGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ERPNextVPC
+      VpnGatewayId: !Ref VPNGateway
+
+  CustomerGateway:
+    Type: AWS::EC2::CustomerGateway
+    Properties:
+      BgpAsn: 65000
+      IpAddress: 38.43.130.182
+      Type: ipsec.1
+
+  VPNConnectionRoute:
+    Type: AWS::EC2::VPNConnectionRoute
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      VpnConnectionId: !Ref VPNConnection
+
+  VPNConnection:
+    Type: AWS::EC2::VPNConnection
+    Properties:
+      Type: ipsec.1
+      CustomerGatewayId: !Ref CustomerGateway
+      VpnGatewayId: !Ref VPNGateway
+      StaticRoutesOnly: true
+
+Outputs:
+  ERPNextURL:
+    Description: URL de acceso a ERPNext
+    Value: !Sub http://${ERPNextALB.DNSName}
+  RDSEndpoint:
+    Description: Endpoint de la base de datos RDS
+    Value: !GetAtt ERPNextDB.Endpoint.Address
+  RedisEndpoint:
+    Description: Endpoint de Redis
+    Value: !GetAtt ERPNextCache.RedisEndpoint.Address
+  BackupBucket:
+    Description: Bucket de S3 para backups
+    Value: !Ref ERPNextBackupBucket
+  VPNConfig:
+    Description: Configuraci?n para VPN local
+    Value: !GetAtt VPNConnection.VpnConnectionId
