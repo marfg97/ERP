@@ -1,6 +1,6 @@
 <mxfile host="app.diagrams.net" agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36">
   <diagram name="ERP — Complete Architecture" id="OwQEN5jGeOoqKypGaX7S">
-    <mxGraphModel dx="2264" dy="1907" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+    <mxGraphModel dx="2960" dy="2304" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
@@ -143,7 +143,7 @@
           <mxGeometry height="60" width="120" x="370" y="890" as="geometry" />
         </mxCell>
         <mxCell id="lvSsnwpoyoxaLZZ17WYD-96" parent="1" style="rounded=2;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" value="E-commerce&#xa;(Shopify · Woo)" vertex="1">
-          <mxGeometry height="60" width="140" x="530" y="890" as="geometry" />
+          <mxGeometry height="60" width="140" x="520" y="960" as="geometry" />
         </mxCell>
         <mxCell id="lvSsnwpoyoxaLZZ17WYD-97" parent="1" style="rounded=2;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" value="CRM&#xa;(HubSpot)" vertex="1">
           <mxGeometry height="60" width="120" x="710" y="890" as="geometry" />
